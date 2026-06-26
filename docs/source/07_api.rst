@@ -31,6 +31,7 @@ API
     fdtdx.Device
     fdtdx.DiagonalSymmetry2D
     fdtdx.DiagonalSymmetry3D
+    fdtdx.DifferentiableExtrudedPolygon
     fdtdx.DispersionModel
     fdtdx.DrudePole
     fdtdx.DtypeConversion

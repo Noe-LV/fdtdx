@@ -120,6 +120,7 @@ from fdtdx.objects.static_material.gds_layer_stack import (
     sources_from_gds_ports,
 )
 from fdtdx.objects.static_material.polygon import (
+    DifferentiableExtrudedPolygon,
     ExtrudedPolygon,
     extruded_polygon_from_gds,
     extruded_polygon_from_gds_path,
@@ -162,6 +163,7 @@ __all__ = [
     "Device",
     "DiagonalSymmetry2D",
     "DiagonalSymmetry3D",
+    "DifferentiableExtrudedPolygon",
     "DispersionModel",
     "DrudePole",
     "DtypeConversion",
