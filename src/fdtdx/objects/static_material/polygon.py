@@ -243,6 +243,8 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
 
     _h_centers_np: np.ndarray | None = frozen_field(default=None, init=False)
     _v_centers_np: np.ndarray | None = frozen_field(default=None, init=False)
+    _center_h: float = frozen_field(default=0.0, init=False)
+    _center_v: float = frozen_field(default=0.0, init=False)
     _smoothing_hw: float = frozen_field(default=0.0, init=False)
     _finalized: bool = frozen_field(default=False, init=False)
 
@@ -297,11 +299,17 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
         v_centers = self._extract_centers_np(self.vertical_axis)
         hw = self._extract_smoothing_hw()
 
+        h_ax = self.horizontal_axis
+        v_ax = self.vertical_axis
+        real_shape = self.real_shape  # safe here — outside jit
+
         # aset returns a new frozen instance with the fields updated
         obj = self.aset("_h_centers_np", h_centers)
         obj = obj.aset("_v_centers_np", v_centers)
         obj = obj.aset("_smoothing_hw", hw)
         obj = obj.aset("_finalized", True)
+        obj = obj.aset("_center_h", float(0.5 * real_shape[h_ax]))
+        obj = obj.aset("_center_v", float(0.5 * real_shape[v_ax]))
         return obj
 
     def _extract_centers_np(self, ax: int) -> np.ndarray:
@@ -410,8 +418,12 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
             v_centers = jnp.asarray(self._extract_centers_np(v_ax))
             hw = self._extract_smoothing_hw()
 
-        center_h = 0.5 * self.real_shape[h_ax]
-        center_v = 0.5 * self.real_shape[v_ax]
+        if self._finalized:
+            center_h = self._center_h
+            center_v = self._center_v
+        else:
+            center_h = float(0.5 * self.real_shape[h_ax])
+            center_v = float(0.5 * self.real_shape[v_ax])
         grid_verts = self.vertices + jnp.array([center_h, center_v])
 
         sdf = self._polygon_sdf(h_centers, v_centers, grid_verts)
