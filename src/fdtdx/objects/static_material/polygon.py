@@ -395,37 +395,29 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
     # ------------------------------------------------------------------ #
 
     def get_voxel_mask_for_shape(self) -> jax.Array:
-        """Soft fill-fraction mask in [0, 1], differentiable w.r.t. vertices.
-
-        Requires ``finalize()`` to have been called first. Raises if not.
-        All grid geometry comes from frozen numpy fields — nothing here
-        touches the config pytree, so the method is fully jit-safe.
-        """
-        if not self._finalized:
-            raise RuntimeError(
-                f"DifferentiableExtrudedPolygon '{self.name}' has not been "
-                f"finalized. Call finalize_differentiable_polygons(objects) "
-                f"after solving placement constraints and before jit."
-            )
-
         h_ax = self.horizontal_axis
         v_ax = self.vertical_axis
 
-        # Frozen numpy → jnp: JAX sees these as compile-time constants
-        assert self._h_centers_np is not None and self._v_centers_np is not None
-        h_centers = jnp.asarray(self._h_centers_np)
-        v_centers = jnp.asarray(self._v_centers_np)
+        # Use pre-extracted numpy arrays if finalized (jit-safe path),
+        # otherwise compute on the fly (placement path, outside jit).
+        if self._finalized:
+            assert self._h_centers_np is not None and self._v_centers_np is not None
+            h_centers = jnp.asarray(self._h_centers_np)
+            v_centers = jnp.asarray(self._v_centers_np)
+            hw = self._smoothing_hw
+        else:
+            h_centers = jnp.asarray(self._extract_centers_np(h_ax))
+            v_centers = jnp.asarray(self._extract_centers_np(v_ax))
+            hw = self._extract_smoothing_hw()
 
-        center_h = 0.5 * self.real_shape[h_ax]  # static float
-        center_v = 0.5 * self.real_shape[v_ax]  # static float
+        center_h = 0.5 * self.real_shape[h_ax]
+        center_v = 0.5 * self.real_shape[v_ax]
         grid_verts = self.vertices + jnp.array([center_h, center_v])
 
         sdf = self._polygon_sdf(h_centers, v_centers, grid_verts)
+        fill_2d = 0.5 * (1.0 - jnp.tanh(sdf / (hw + 1e-30)))
 
-        # _smoothing_hw is a frozen Python float — not traced
-        fill_2d = 0.5 * (1.0 - jnp.tanh(sdf / (self._smoothing_hw + 1e-30)))
-
-        extrusion_height = self.grid_shape[self.axis]  # static int
+        extrusion_height = self.grid_shape[self.axis]
         fill_2d_expanded = jnp.expand_dims(fill_2d, axis=self.axis)
         return jnp.repeat(fill_2d_expanded, repeats=extrusion_height, axis=self.axis)
 
