@@ -247,11 +247,9 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
     _n_vertices: int = frozen_field(default=0, init=False)
 
     #: Pre-computed horizontal grid cell centers (relative to object lower
-    #: edge). Frozen jnp array — derived from static config only.
-    _h_centers: jax.Array = frozen_field()
-
-    #: Pre-computed vertical grid cell centers. Frozen jnp array.
-    _v_centers: jax.Array = frozen_field()
+    #: edge). Frozen np array — derived from static config only.
+    _h_centers: np.ndarray = frozen_field(default=np.empty(0), init=False)
+    _v_centers: np.ndarray = frozen_field(default=np.empty(0), init=False)
 
     #: SDF smoothing half-width in meters. Static float, frozen at init.
     _smoothing_hw: float = frozen_field(default=0.0, init=False)
@@ -291,8 +289,8 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
         # ---- pre-compute grid centers (numpy, no tracing) ---- #
         h_centers = self._compute_grid_centers_np(self.horizontal_axis)
         v_centers = self._compute_grid_centers_np(self.vertical_axis)
-        object.__setattr__(self, "_h_centers", jnp.asarray(h_centers))
-        object.__setattr__(self, "_v_centers", jnp.asarray(v_centers))
+        object.__setattr__(self, "_h_centers", h_centers)  # plain np.ndarray
+        object.__setattr__(self, "_v_centers", v_centers)  # plain np.ndarray
 
         # ---- pre-compute smoothing half-width ---- #
         if self.smoothing_width is not None:
@@ -436,7 +434,11 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
         grid_verts = self.vertices + jnp.array([center_h, center_v])
 
         # SDF: (H, V), negative inside — differentiable through grid_verts
-        sdf = self._polygon_sdf(self._h_centers, self._v_centers, grid_verts)
+        sdf = self._polygon_sdf(
+            jnp.asarray(self._h_centers),
+            jnp.asarray(self._v_centers),
+            grid_verts,
+        )
 
         # Smooth fill fraction via tanh: 1 inside, 0 outside, smooth boundary
         # _smoothing_hw is a static float frozen at __post_init__
