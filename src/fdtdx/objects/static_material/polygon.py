@@ -201,9 +201,11 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
     is a soft float array in ``[0, 1]`` computed via a smooth polygon signed
     distance field (SDF), making it fully differentiable w.r.t. ``vertices``.
 
-    The bounding box is fixed from the *initial* vertices and does not update
-    as vertices move during optimization. The allocated grid region therefore
-    stays constant; vertices should remain within it.
+    After placement constraints are solved and before any jit-compiled
+    function is called, ``finalize()`` must be called on the object (or on
+    the container via ``finalize_differentiable_polygons``). This extracts
+    all static grid geometry into plain numpy arrays so nothing inside
+    ``get_voxel_mask_for_shape`` needs to touch the config pytree under jit.
 
     Args:
         material_name: Name of the material in the ``materials`` dict.
@@ -212,46 +214,45 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
             (meters), centered at the origin. Non-frozen — participates in
             JAX differentiation.
         smoothing_width: Width of the SDF transition band in meters.
-            ``None`` (default) uses one grid cell width, computed from the
-            config when the mask is first requested.
+            ``None`` (default) uses one grid cell width.
     """
 
     # ------------------------------------------------------------------ #
     # Public constructor fields                                            #
     # ------------------------------------------------------------------ #
 
-    #: Material name in the materials dictionary.
     material_name: str = frozen_field()
-
-    #: Extrusion axis (0=x, 1=y, 2=z).
     axis: int = frozen_field()
 
-    #: (N, 2) polygon vertices in meters, centered at origin.
-    #: Non-frozen so JAX can differentiate through it.
+    #: Non-frozen — the only traced leaf. Shape (N, 2), meters, centered.
     vertices: jax.Array = field()
 
-    #: Optional explicit SDF transition width (meters).
-    #: None → one grid cell, computed from config at mask-generation time.
     smoothing_width: float | None = frozen_field(default=None)
 
     # ------------------------------------------------------------------ #
-    # Private fields frozen at __post_init__                              #
+    # Private fields set in __post_init__ (pre-placement)                 #
     # ------------------------------------------------------------------ #
 
-    #: Number of polygon vertices. Static Python int, frozen at init.
-    #: Never read from verts.shape[0] inside jit.
+    #: Static vertex count — never read verts.shape[0] under jit.
     _n_vertices: int = frozen_field(default=0, init=False)
 
     # ------------------------------------------------------------------ #
-    # Initialisation                                                       #
+    # Private fields set in finalize() (post-placement)                   #
+    # These hold plain numpy arrays extracted from the config before jit. #
+    # ------------------------------------------------------------------ #
+
+    _h_centers_np: np.ndarray | None = frozen_field(default=None, init=False)
+    _v_centers_np: np.ndarray | None = frozen_field(default=None, init=False)
+    _smoothing_hw: float = frozen_field(default=0.0, init=False)
+    _finalized: bool = frozen_field(default=False, init=False)
+
+    # ------------------------------------------------------------------ #
+    # __post_init__: only what is available before placement              #
     # ------------------------------------------------------------------ #
 
     def __post_init__(self):
         verts_np = np.asarray(self.vertices)
 
-        # ---- bounding box → allocate grid region ---- #
-        # grid_slice_tuple is NOT available yet (object not placed),
-        # but real_shape only needs the vertex bounding box.
         w = float(verts_np[:, 0].max() - verts_np[:, 0].min())
         h = float(verts_np[:, 1].max() - verts_np[:, 1].min())
         real_shape = list(self.partial_real_shape)
@@ -272,91 +273,101 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
                 )
             real_shape[ax] = size
         object.__setattr__(self, "partial_real_shape", tuple(real_shape))
-
-        # ---- static vertex count ---- #
-        # Frozen here so _polygon_sdf never reads verts.shape[0] under jit.
         object.__setattr__(self, "_n_vertices", int(verts_np.shape[0]))
 
     # ------------------------------------------------------------------ #
-    # Static axis helpers                                                  #
+    # finalize(): call after placement, before any jit-compiled function  #
     # ------------------------------------------------------------------ #
 
-    @property
-    def horizontal_axis(self) -> int:
-        """Horizontal axis perpendicular to the extrusion axis."""
-        return get_transverse_axes(self.axis)[0]
+    def finalize(self) -> "DifferentiableExtrudedPolygon":
+        """Extract static grid geometry into plain numpy and return new instance.
 
-    @property
-    def vertical_axis(self) -> int:
-        """Vertical axis perpendicular to the extrusion axis."""
-        return get_transverse_axes(self.axis)[1]
+        Must be called after placement constraints are solved (so that
+        ``grid_slice_tuple`` and ``grid_shape`` are available) and before
+        any ``jit``-compiled function that calls ``get_voxel_mask_for_shape``.
 
-    # ------------------------------------------------------------------ #
-    # Grid center computation — numpy, called after object is placed      #
-    # ------------------------------------------------------------------ #
+        Returns a new (frozen) instance with ``_h_centers_np``,
+        ``_v_centers_np``, and ``_smoothing_hw`` populated.
 
-    def _compute_grid_centers_np(self, ax: int) -> np.ndarray:
-        """Grid cell centers relative to this object's lower edge.
+        Example::
 
-        Uses only static config/placement values (plain numpy). Safe to call
-        any time after the object has been placed in the grid (i.e. after
-        constraints are solved). Never called inside jit — result is wrapped
-        in jnp.asarray() at the call site, which JAX treats as a
-        compile-time constant since the numpy array itself is not a traced
-        leaf.
+            objects = finalize_differentiable_polygons(objects)
         """
-        lower, upper = self.grid_slice_tuple[ax]  # available post-placement
+        h_centers = self._extract_centers_np(self.horizontal_axis)
+        v_centers = self._extract_centers_np(self.vertical_axis)
+        hw = self._extract_smoothing_hw()
+
+        # aset returns a new frozen instance with the fields updated
+        obj = self.aset("_h_centers_np", h_centers)
+        obj = obj.aset("_v_centers_np", v_centers)
+        obj = obj.aset("_smoothing_hw", hw)
+        obj = obj.aset("_finalized", True)
+        return obj
+
+    def _extract_centers_np(self, ax: int) -> np.ndarray:
+        """Extract grid cell centers as a plain numpy array.
+
+        Called only from ``finalize()``, outside jit, after placement.
+        ``grid.edges(ax)`` is called here on the real (non-traced) config.
+        """
+        lower, upper = self.grid_slice_tuple[ax]
         grid = self._config.resolved_grid
         if grid is None:
             spacing = float(self._config.uniform_spacing())
             n = self.grid_shape[ax]
             return (np.arange(n) + 0.5) * spacing
-        edges = np.asarray(grid.edges(ax))
+        # Call .edges() here in Python, outside jit — returns a real array
+        edges = np.array(grid.edges(ax))  # force numpy, not jnp
         centers = 0.5 * (edges[lower:upper] + edges[lower + 1 : upper + 1])
         return centers - edges[lower]
 
-    def _compute_smoothing_hw(self) -> float:
-        """Smoothing half-width in meters, derived from config post-placement."""
+    def _extract_smoothing_hw(self) -> float:
+        """Extract smoothing half-width as a plain Python float."""
         if self.smoothing_width is not None:
             return float(self.smoothing_width) * 0.5
         grid = self._config.resolved_grid
         if grid is None:
-            spacing = float(self._config.uniform_spacing())
-        else:
-            h_lo, h_hi = self.grid_slice_tuple[self.horizontal_axis]
-            v_lo, v_hi = self.grid_slice_tuple[self.vertical_axis]
-            edges_h = np.asarray(grid.edges(self.horizontal_axis))
-            edges_v = np.asarray(grid.edges(self.vertical_axis))
-            spacing = 0.5 * (
-                float(np.mean(np.diff(edges_h[h_lo : h_hi + 1]))) + float(np.mean(np.diff(edges_v[v_lo : v_hi + 1])))
-            )
+            return 0.5 * float(self._config.uniform_spacing())
+        h_lo, h_hi = self.grid_slice_tuple[self.horizontal_axis]
+        v_lo, v_hi = self.grid_slice_tuple[self.vertical_axis]
+        edges_h = np.array(grid.edges(self.horizontal_axis))
+        edges_v = np.array(grid.edges(self.vertical_axis))
+        spacing = 0.5 * (
+            float(np.mean(np.diff(edges_h[h_lo : h_hi + 1]))) + float(np.mean(np.diff(edges_v[v_lo : v_hi + 1])))
+        )
         return 0.5 * spacing
 
     # ------------------------------------------------------------------ #
-    # Differentiable polygon SDF                                          #
+    # Axis helpers                                                         #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def horizontal_axis(self) -> int:
+        return get_transverse_axes(self.axis)[0]
+
+    @property
+    def vertical_axis(self) -> int:
+        return get_transverse_axes(self.axis)[1]
+
+    # ------------------------------------------------------------------ #
+    # Differentiable SDF — safe under jit                                 #
     # ------------------------------------------------------------------ #
 
     def _polygon_sdf(
         self,
-        px: jax.Array,  # (H,) horizontal grid centers — compile-time constant
-        py: jax.Array,  # (V,) vertical grid centers — compile-time constant
+        px: jax.Array,  # (H,) — compile-time constant from numpy
+        py: jax.Array,  # (V,) — compile-time constant from numpy
         verts: jax.Array,  # (N, 2) — the only traced quantity
     ) -> jax.Array:
-        """Signed distance field for a 2-D polygon evaluated on a grid.
-
-        Returns ``(H, V)``, negative inside the polygon. Fully differentiable
-        w.r.t. ``verts``. The vertex count comes from the frozen
-        ``_n_vertices`` field — never from ``verts.shape[0]`` — so this is
-        safe under ``jit``.
-        """
+        """Signed distance field, negative inside. Differentiable w.r.t. verts."""
         gx, gy = jnp.meshgrid(px, py, indexing="ij")
         points = jnp.stack([gx, gy], axis=-1)  # (H, V, 2)
 
-        v0 = verts  # (N, 2) edge starts
-        v1 = jnp.roll(verts, -1, axis=0)  # (N, 2) edge ends
+        v0 = verts
+        v1 = jnp.roll(verts, -1, axis=0)
 
-        p = points[:, :, None, :]  # (H, V, 1, 2)
-        a = v0[None, None, :, :]  # (H, V, N, 2)
+        p = points[:, :, None, :]
+        a = v0[None, None, :, :]
         b = v1[None, None, :, :]
 
         ab = b - a
@@ -384,31 +395,35 @@ class DifferentiableExtrudedPolygon(StaticMultiMaterialObject):
     # ------------------------------------------------------------------ #
 
     def get_voxel_mask_for_shape(self) -> jax.Array:
-        """Soft voxel fill-fraction mask, differentiable w.r.t. ``vertices``.
+        """Soft fill-fraction mask in [0, 1], differentiable w.r.t. vertices.
 
-        Returns float ``[0, 1]`` of shape ``grid_shape``.
-
-        Grid centers and smoothing width are computed here from static numpy
-        config values and wrapped in ``jnp.asarray()``. JAX treats these as
-        compile-time constants (they are not traced leaves), so the only
-        quantity that actually flows through the JAX trace is ``self.vertices``.
+        Requires ``finalize()`` to have been called first. Raises if not.
+        All grid geometry comes from frozen numpy fields — nothing here
+        touches the config pytree, so the method is fully jit-safe.
         """
+        if not self._finalized:
+            raise RuntimeError(
+                f"DifferentiableExtrudedPolygon '{self.name}' has not been "
+                f"finalized. Call finalize_differentiable_polygons(objects) "
+                f"after solving placement constraints and before jit."
+            )
+
         h_ax = self.horizontal_axis
         v_ax = self.vertical_axis
 
-        # Compile-time constants: numpy → jnp.asarray is a no-op in the trace
-        h_centers = jnp.asarray(self._compute_grid_centers_np(h_ax))
-        v_centers = jnp.asarray(self._compute_grid_centers_np(v_ax))
-        hw = self._compute_smoothing_hw()  # plain Python float
+        # Frozen numpy → jnp: JAX sees these as compile-time constants
+        assert self._h_centers_np is not None and self._v_centers_np is not None
+        h_centers = jnp.asarray(self._h_centers_np)
+        v_centers = jnp.asarray(self._v_centers_np)
 
-        # Only self.vertices is traced beyond this point
         center_h = 0.5 * self.real_shape[h_ax]  # static float
         center_v = 0.5 * self.real_shape[v_ax]  # static float
         grid_verts = self.vertices + jnp.array([center_h, center_v])
 
         sdf = self._polygon_sdf(h_centers, v_centers, grid_verts)
 
-        fill_2d = 0.5 * (1.0 - jnp.tanh(sdf / (hw + 1e-30)))
+        # _smoothing_hw is a frozen Python float — not traced
+        fill_2d = 0.5 * (1.0 - jnp.tanh(sdf / (self._smoothing_hw + 1e-30)))
 
         extrusion_height = self.grid_shape[self.axis]  # static int
         fill_2d_expanded = jnp.expand_dims(fill_2d, axis=self.axis)
