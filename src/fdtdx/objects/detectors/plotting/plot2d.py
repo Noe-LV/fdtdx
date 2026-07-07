@@ -1,3 +1,5 @@
+from typing import Literal
+
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -14,6 +16,8 @@ def plot_2d_from_slices(
     maxvals: tuple[float | None, float | None, float | None] = (None, None, None),
     plot_interpolation: str = "gaussian",
     plot_dpi: int | None = None,
+    aspect: Literal["equal", "auto"] = "equal",
+    cmap: str = "default",
 ) -> Figure:
     """Plot orthogonal slices using either uniform spacing or rectilinear edges.
 
@@ -30,6 +34,11 @@ def plot_2d_from_slices(
         maxvals: Per-slice color maxima.
         plot_interpolation: Interpolation used by the legacy uniform imshow path.
         plot_dpi: Figure DPI.
+        cmap: str = "default": Color map for the detector plots. "default" is a custom
+            red-blue seaborn color map.
+        aspect: Literal["auto", "equal"]: Size aspect of the detector plots.
+            "equal" (default) uses the same scale for all axes.
+            "auto" adjusts each axis's scale to fit the figure size.
 
     Returns:
         Matplotlib figure with XY, XZ, and YZ panels.
@@ -46,7 +55,10 @@ def plot_2d_from_slices(
             maxvals = max_list[0], max_list[1], max_list[2]
 
     fig = plt.figure(figsize=(20, 10), dpi=plot_dpi)
-    cmap = sns.diverging_palette(220, 20, as_cmap=True)
+    if cmap == "default":
+        color_map = sns.diverging_palette(220, 20, as_cmap=True)
+    else:
+        color_map = cmap
     res_x = resolutions[0] / 1.0e-6  # Convert to µm
     res_y = resolutions[1] / 1.0e-6
     res_z = resolutions[2] / 1.0e-6
@@ -54,6 +66,7 @@ def plot_2d_from_slices(
 
     # Create XY plane plot
     ax1 = fig.add_subplot(131)
+    assert minvals[0] is not None and maxvals[0] is not None
     if coordinate_edges_um is None:
         extent1 = (
             0,
@@ -63,12 +76,12 @@ def plot_2d_from_slices(
         )
         cax1 = ax1.imshow(
             xy_slice.T,
-            cmap=cmap,
+            cmap=color_map,
             vmin=minvals[0],
             vmax=maxvals[0],
             extent=extent1,
             interpolation=plot_interpolation,
-            aspect="equal",
+            aspect=aspect,
             origin="lower",
         )
     else:
@@ -76,12 +89,12 @@ def plot_2d_from_slices(
             coordinate_edges_um[0],
             coordinate_edges_um[1],
             xy_slice.T,
-            cmap=cmap,
+            cmap=color_map,
             vmin=minvals[0],
             vmax=maxvals[0],
             shading="auto",
         )
-        ax1.set_aspect("equal")
+        ax1.set_aspect(aspect)
     ax1.set_xlabel("X axis (µm)")
     ax1.set_ylabel("Y axis (µm)")
 
@@ -90,6 +103,7 @@ def plot_2d_from_slices(
     # Create XZ plane plot
 
     ax2 = fig.add_subplot(132)
+    assert minvals[1] is not None and maxvals[1] is not None
     if coordinate_edges_um is None:
         extent2 = (
             0,
@@ -99,12 +113,12 @@ def plot_2d_from_slices(
         )
         cax2 = ax2.imshow(
             xz_slice.T,
-            cmap=cmap,
+            cmap=color_map,
             vmin=minvals[1],
             vmax=maxvals[1],
             extent=extent2,
             interpolation=plot_interpolation,
-            aspect="equal",
+            aspect=aspect,
             origin="lower",
         )
     else:
@@ -112,12 +126,12 @@ def plot_2d_from_slices(
             coordinate_edges_um[0],
             coordinate_edges_um[2],
             xz_slice.T,
-            cmap=cmap,
+            cmap=color_map,
             vmin=minvals[1],
             vmax=maxvals[1],
             shading="auto",
         )
-        ax2.set_aspect("equal")
+        ax2.set_aspect(aspect)
     ax2.set_xlabel("X axis (µm)")
     ax2.set_ylabel("Z axis (µm)")
 
@@ -125,6 +139,7 @@ def plot_2d_from_slices(
 
     # # Create YZ plane plot
     ax3 = fig.add_subplot(133)
+    assert minvals[2] is not None and maxvals[2] is not None
     if coordinate_edges_um is None:
         extent3 = (
             0,
@@ -134,12 +149,12 @@ def plot_2d_from_slices(
         )
         cax3 = ax3.imshow(
             yz_slice.T,
-            cmap=cmap,
+            cmap=color_map,
             vmin=minvals[2],
             vmax=maxvals[2],
             extent=extent3,
             interpolation=plot_interpolation,
-            aspect="equal",
+            aspect=aspect,
             origin="lower",
         )
     else:
@@ -147,12 +162,12 @@ def plot_2d_from_slices(
             coordinate_edges_um[1],
             coordinate_edges_um[2],
             yz_slice.T,
-            cmap=cmap,
+            cmap=color_map,
             vmin=minvals[2],
             vmax=maxvals[2],
             shading="auto",
         )
-        ax3.set_aspect("equal")
+        ax3.set_aspect(aspect)
     ax3.set_xlabel("Y axis (µm)")
     ax3.set_ylabel("Z axis (µm)")
 
